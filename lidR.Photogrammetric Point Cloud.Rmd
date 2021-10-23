@@ -1,0 +1,185 @@
+---
+title: "Photogrammetric Point Cloud Processing with lidR"
+author: "Mateus Tinoco Silva"
+date: "17/10/2021"
+output: html_document
+---
+
+
+
+## Introduction
+### Lately, several works have been conducted aiming to investigate possibilities of extracting forests’ structural metrics from  Digital Aerial Photogrammetry (DAP) point clouds (PC).  <br />  This markdown demonstrates a simple workflow on lidR for DAP-PC processing and tree metrics deriving.
+
+## Recommended Bibliography
+
+<https://jean-romain.github.io/lidRbook/index.html>  <br /> 
+<https://doi.org/10.1007/s40725-019-00087-2>  <br /> 
+<https://doi.org/10.1016/j.rse.2018.05.016>  <br /> 
+<https://doi.org/10.3390/rs13183655> <br /> 
+<https://doi.org/10.3390/rs12213560>  <br /> 
+
+```{r p1, message=FALSE, warning=FALSE, include=FALSE}
+r3dDefaults = rgl::r3dDefaults
+m = structure(c(0.921, -0.146, 0.362, 0, 0.386, 0.482, -0.787, 0, 
+                -0.06, 0.864, 0.5, 0, 0, 0, 0, 1), .Dim = c(4L, 4L))
+rgl::setupKnitr()
+r3dDefaults$FOV = 50
+r3dDefaults$userMatrix = m
+r3dDefaults$zoom = 0.75
+
+library(lidR)
+library(ggplot2)
+library(knitr)
+library(rasterVis)
+library(dplyr)
+library(ggplot2)
+library(sf)
+options(lidR.progress = F)
+knitr::opts_chunk$set(
+  comment =  "#>", 
+  collapse = TRUE,
+  fig.align = "center")
+rgdal::set_thin_PROJ6_warnings(TRUE)
+options(crayon.enabled = TRUE)
+old_hooks <- fansi::set_knit_hooks(knitr::knit_hooks, which = c("output", "message", "error"))
+```
+
+```{r p2, setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r p3, message=FALSE, warning=FALSE, include=FALSE}
+path_point_cloud <- "data/pointcloud.las"
+path_roi <- "data/roi.shp"
+plot_crossection <- function(las,
+                             p1 = c(min(las@data$X), mean(las@data$Y)),
+                             p2 = c(max(las@data$X), mean(las@data$Y)),
+                             width = 4, colour_by = NULL)
+{
+  colour_by <- enquo(colour_by)
+  data_clip <- clip_transect(las, p1, p2, width)
+  p <- ggplot(data_clip@data, aes(X,Z)) + geom_point(size = 0.5) + coord_equal() + theme_minimal()
+  
+  if (!is.null(colour_by))
+    p <- p + aes(color = !!colour_by) + labs(color = "")
+  
+  return(p)
+}
+```
+
+## Loading Data
+```{r p4, echo=TRUE, message=FALSE}
+roi <- st_read(path_roi, quiet =T)
+point_cloud <- readLAS(path_point_cloud) %>% clip_roi(roi)
+```
+
+```{r p42, echo=TRUE, message=TRUE}
+print(point_cloud)
+```
+
+## Point Cloud Visual Inspection
+```{r p50, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, include=FALSE, rgl=TRUE}
+plot(point_cloud,color="RGB",size = 3, bg = "white",  axis = TRUE)
+```
+
+
+```{r p41, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+plot(point_cloud,color="RGB",size = 3, bg = "white",  axis = TRUE)
+```
+
+
+## Creating a Digital Surface Model (DSM)
+```{r p5, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+dsm <- grid_canopy(point_cloud,res=0.5,algorithm = dsmtin())
+plot(dsm,col = height.colors(50))
+```
+
+## Ground Classification
+```{r message=FALSE}
+ws <- seq(3, 12, 3)
+th <- seq(0.1, 1.5, length.out = length(ws))
+point_cloud_class <- classify_ground(point_cloud, algorithm = pmf(ws = ws, th = th))
+```
+
+## Noise Classification
+```{r p7, message=FALSE}
+point_cloud_class <- classify_noise(point_cloud_class, ivf(res = 0.5, n = 50))
+```
+
+```{r p8, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+plot(point_cloud_class %>% filter_poi(Classification!=LASNOISE),
+     color = "Classification", size = 3, bg = "white", axis = TRUE) 
+```
+
+## Creating a Digital Terrain Model (DTM)
+```{r p9, echo=TRUE, message=FALSE, warning=FALSE}
+dtm_tin <- grid_terrain(filter_ground(point_cloud_class), 0.5, tin(),keep_lowest = T)
+```
+
+```{r p10, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+plot_dtm3d(dtm_tin, bg = "white")
+```
+
+## Normalizing Point Cloud
+```{r  message=FALSE}
+point_cloud_norm <- normalize_height(point_cloud_class, knnidw())%>% filter_poi(Z>= 0)
+```
+
+```{r p12, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+plot(point_cloud_norm, color = "Z", size = 3, bg = "white", axis = TRUE) 
+```
+
+## Analysing a Vertical Transect
+```{r p13, echo=TRUE, fig.height=1.5, fig.width=8, message=FALSE, warning=FALSE}
+p1 <- c(306775, 8353310)
+p2 <- c(306732, 8353250)
+
+las_tr <- clip_transect(point_cloud_norm, p1, p2, width = 4, xz = TRUE)
+
+ggplot(las_tr@data, aes(X,Z, color = Z)) + 
+  geom_point(size = 0.5) + 
+  coord_equal() + 
+  theme_minimal() +
+  scale_color_gradientn(colours = height.colors(50))
+```
+
+## Create a Canopy Height Model (CHM)
+```{r p14, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+chm <- grid_canopy(point_cloud_norm,res=0.5,algorithm = dsmtin(max_edge = 3))
+plot(chm,col = height.colors(50))
+```
+
+## Individual Tree Detection 
+```{r message=FALSE}
+ttops <- find_trees(point_cloud_norm, lmf( ws = 5))
+```
+
+```{r p16, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+plot(chm, col = height.colors(50))
+plot(ttops, add = TRUE)
+```
+
+```{r p17, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+x <- plot(point_cloud_norm, bg = "white", size = 4, axis = TRUE, legend = TRUE)
+add_treetops3d(x, ttops)
+```
+
+## Individual Tree Segmentation
+```{r p18, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+algo <- dalponte2016(chm, ttops)
+point_cloud_norm <- segment_trees(point_cloud_norm, algo) 
+plot(point_cloud_norm, bg = "white", size = 3, color = "treeID") 
+```
+
+```{r p19, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE, rgl=TRUE}
+plot(filter_poi(point_cloud_norm, treeID == 5), size = 3, bg = "white",  axis = TRUE, legend = TRUE)
+```
+
+## Individual Tree Metrics
+```{r p20, echo=TRUE, fig.height=5, fig.width=6, message=FALSE, warning=FALSE}
+ttops <- tree_metrics(point_cloud_norm, func = .stdmetrics) %>% st_as_sf()
+kable(summary(ttops[,c(	"zmax",	"zmean","zsd","zq95","area")]%>% st_drop_geometry()))
+hist(ttops$zmax,plot = T, main = "Height Distribruition (m)",xlab =   "Height (m)",ylab = "Frequency")
+```
+
+
